@@ -1,0 +1,56 @@
+name: sync-google-jwks
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-google-jwks
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch Google JWKS
+        run: |
+          curl -fsS --retry 3 https://www.googleapis.com/oauth2/v3/certs -o jwks.new.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open("jwks.new.json"))
+          keys = d.get("keys") or []
+          assert keys, "empty JWKS"
+          for k in keys:
+              assert k.get("kid") and k.get("n") and k.get("e") and k.get("kty") == "RSA", k
+          PY
+          mv jwks.new.json jwks.json
+
+      # Keep a single commit on main, authored by the bot: the history of public
+      # keys is of no use, so the branch is replaced with one fresh orphan commit
+      # whenever the keys change or main holds anything else (a manual commit).
+      - name: Force-push if changed
+        env:
+          BOT_NAME: github-actions[bot]
+          BOT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          single_bot_commit=false
+          if [ "$(git log -1 --format=%ae%n%ce | sort -u)" = "$BOT_EMAIL" ] \
+            && ! git cat-file -p HEAD | grep -q '^parent '; then
+            single_bot_commit=true
+          fi
+          if git diff --quiet -- jwks.json && [ "$single_bot_commit" = true ]; then
+            echo "unchanged"
+            exit 0
+          fi
+          git config user.name "$BOT_NAME"
+          git config user.email "$BOT_EMAIL"
+          git checkout --orphan jwks-update
+          git add -A
+          git commit -m "Update JWKS"
+          git push --force origin HEAD:${{ github.ref_name }}
